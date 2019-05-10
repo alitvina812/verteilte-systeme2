@@ -159,17 +159,31 @@ public class TcpMonitorServer implements Runnable, AutoCloseable {
 					
 					final Runnable clientInToServerOut = () -> {
 						try {
-							de.htw.tool.IOStreams.copy(clientIn, serverOut, MAX_PACKET_SIZE);
-						} catch (IOException e) {
-							e.printStackTrace();
-						}						
+							
+							try {
+								de.htw.tool.IOStreams.copy(clientIn, serverOut, MAX_PACKET_SIZE);
+							} catch (IOException e) {
+								e.printStackTrace();
+							}						
+						} finally {
+							synchronized (monitor) {
+								monitor.notify();
+							}
+						}
 					};
 					
 					final Runnable serverInToClientOut = () -> {
 						try {
-							de.htw.tool.IOStreams.copy(serverIn, clientOut, MAX_PACKET_SIZE);
-						} catch (IOException e) {
-							e.printStackTrace();
+							try {
+								de.htw.tool.IOStreams.copy(serverIn, clientOut, MAX_PACKET_SIZE);
+							} catch (IOException e) {
+								e.printStackTrace();
+							}
+							
+						} finally {
+							synchronized (monitor) {
+								monitor.notify();
+							}
 						}
 						
 					};
