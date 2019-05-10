@@ -232,7 +232,7 @@ public final class FtpClient implements AutoCloseable {
 			
 			if (response.getCode() == 150) {
 				OutputStream out = s.getOutputStream();
-				// ??? 				
+				// ???
 				out.close();
 			}
 			if (response.getCode() == 226) {

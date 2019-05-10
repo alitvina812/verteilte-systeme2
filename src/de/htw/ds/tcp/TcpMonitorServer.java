@@ -153,9 +153,17 @@ public class TcpMonitorServer implements Runnable, AutoCloseable {
 					InputStream serverIn = serverConnection.getInputStream();
 					OutputStream serverOut = serverConnection.getOutputStream();
 					
-//					final Runnable clientIntToServerOut = () -> {
-						de.htw.tool.IOStreams.copy(clientIn, serverOut, MAX_PACKET_SIZE);						
-//					};
+					final Thread[] threads = new Thread[3];
+					final Object monitor = new Object();
+					
+					
+					final Runnable clientInToServerOut = () -> {
+						try {
+							de.htw.tool.IOStreams.copy(clientIn, serverOut, MAX_PACKET_SIZE);
+						} catch (IOException e) {
+							e.printStackTrace();
+						}						
+					};
 					
 					final Runnable serverInToClientOut = () -> {
 						try {
@@ -167,12 +175,26 @@ public class TcpMonitorServer implements Runnable, AutoCloseable {
 					};
 					
 					final Runnable serverInToAnotherOut = () -> {
-						
+						// ???
 					};
+					
+					synchronized(monitor) {
+						threads[0] = new Thread(clientInToServerOut, "clientInToServerOut");
+						threads[1] = new Thread(serverInToClientOut, "serverInToClientOut");
+						threads[2] = new Thread(serverInToAnotherOut, "serverInToAnotherOut");
+						
+						try {
+							for(int loop = 0; loop < threads.length; ++loop) {
+								monitor.wait();
+							}
+						} catch (final Throwable exception) {
+							for (final Thread thread : threads) {
+								thread.interrupt();
+							}
+							throw exception;
+						}
+					}
 
-			
-					new Thread(serverInToClientOut, "serverInToClientOut").start();
-					new Thread(serverInToAnotherOut, "serverInToAnotherOut").start();
 					
 					
 					// TODO: Transport all content from the client connection's input stream into
