@@ -1,5 +1,6 @@
 package de.htw.ds.tcp;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -8,8 +9,12 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.RunnableFuture;
 import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -22,7 +27,7 @@ import de.htw.tool.Copyright;
  * This class models a TCP monitor, i.e. a TCP server that redirects all incoming client connections
  * towards another host, while logging all traffic.
  */
-@SuppressWarnings("unused")	// TODO: remove 
+
 @Copyright(year=2008, holders="Sascha Baumeister")
 public class TcpMonitorServer implements Runnable, AutoCloseable {
 	static private final int MAX_PACKET_SIZE = 0xffff - 20 - 20;
@@ -146,18 +151,22 @@ public class TcpMonitorServer implements Runnable, AutoCloseable {
 			final int serverPort = this.parent.redirectHostAddress.getPort();
 			final boolean transportLayerSecurity = serverPort == 22 | serverPort == 443;
 
+//			TLS_SOCKET_FACTORY.createSocket(serverName, serverPort)
 			try (Socket clientConnection = this.clientConnection) {
-				try (Socket serverConnection = transportLayerSecurity ? TLS_SOCKET_FACTORY.createSocket(serverName, serverPort) : new Socket(serverName, serverPort)) {
+				try (Socket serverConnection = new Socket(serverName, serverPort)) {
 					InputStream clientIn = clientConnection.getInputStream();
 					OutputStream clientOut = clientConnection.getOutputStream();
 					InputStream serverIn = serverConnection.getInputStream();
 					OutputStream serverOut = serverConnection.getOutputStream();
+					ByteArrayOutputStream clientOut2 = new ByteArrayOutputStream();
+					ByteArrayOutputStream serverOut2 = new ByteArrayOutputStream();
 					
-					final Thread[] threads = new Thread[3];
+					final RunnableFuture<?>[] futures = new RunnableFuture[2];
+					final Thread[] threads = new Thread[2];
 					final Object monitor = new Object();
 					
 					
-					final Runnable clientInToServerOut = () -> {
+					final Callable<?> clientInToServerOut = () -> {
 						try {
 							
 							try {
@@ -170,12 +179,15 @@ public class TcpMonitorServer implements Runnable, AutoCloseable {
 								monitor.notify();
 							}
 						}
+						return null;
 					};
 					
-					final Runnable serverInToClientOut = () -> {
+					final Callable<?> serverInToClientOut = () -> {
 						try {
 							try {
 								de.htw.tool.IOStreams.copy(serverIn, clientOut, MAX_PACKET_SIZE);
+//								de.htw.tool.IOStreams.copy(serverIn, byteArray, MAX_PACKET_SIZE);
+//								byte[] b = de.htw.tool.IOStreams.read(serverIn);
 							} catch (IOException e) {
 								e.printStackTrace();
 							}
@@ -185,20 +197,25 @@ public class TcpMonitorServer implements Runnable, AutoCloseable {
 								monitor.notify();
 							}
 						}
+//						return byteArray.toByteArray();
+						return null;
 						
 					};
 					
-					final Runnable serverInToAnotherOut = () -> {
-						// ???
-					};
-					
+
+					final long begin = System.currentTimeMillis();
+					futures[0] = new FutureTask<>(clientInToServerOut);
+					futures[1] = new FutureTask<>(serverInToClientOut);
 					synchronized(monitor) {
-						threads[0] = new Thread(clientInToServerOut, "clientInToServerOut");
-						threads[1] = new Thread(serverInToClientOut, "serverInToClientOut");
-						threads[2] = new Thread(serverInToAnotherOut, "serverInToAnotherOut");
+						for (int i = 0; i < futures.length; i++) {
+							threads[i] = new Thread(futures[i]);
+							threads[i].start();
+						}
 						
 						try {
-							for(int loop = 0; loop < threads.length; ++loop) {
+							for(int loop = 0; loop < futures.length; ++loop) {
+//								byte[] b = (byte[]) futures[loop].get();
+//								TcpMonitorRecord record = TcpMonitorRecord();
 								monitor.wait();
 							}
 						} catch (final Throwable exception) {
@@ -208,7 +225,10 @@ public class TcpMonitorServer implements Runnable, AutoCloseable {
 							throw exception;
 						}
 					}
-
+					
+					final long end = System.currentTimeMillis();
+					final TcpMonitorRecord record = new TcpMonitorRecord(begin, end, clientOut2.toByteArray(), serverOut2.toByteArray());
+					this.parent.recordConsumer.accept(record);
 					
 					
 					// TODO: Transport all content from the client connection's input stream into
