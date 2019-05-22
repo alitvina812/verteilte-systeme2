@@ -3,6 +3,7 @@ package de.htw.ds.tcp;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
@@ -16,9 +17,9 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.NotDirectoryException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import org.omg.CORBA_2_3.portable.InputStream;
 import de.htw.tool.Copyright;
 import de.htw.tool.InetAddresses;
 
@@ -146,43 +147,47 @@ public final class FtpClient implements AutoCloseable {
 		if (this.isClosed()) throw new IllegalStateException();
 		if (!Files.isDirectory(sinkDirectory)) throw new NotDirectoryException(sinkDirectory.toString());
 
-		if  (sourceFile.getParent() != null) {
-			FtpResponse response = this.receiveResponse();
-			response = sendRequest("CWD " + sourceFile.getParent());
-			response = sendRequest("PASV");
-			response = receiveResponse();
-			InetSocketAddress address = response.decodeDataPort();
-			Socket s = new Socket(address.getHostName(), address.getPort());
-			response = sendRequest("RETR");
-			if (response.getCode() == 150) {
-				// transport the content of the data connection's INPUT
-				// stream to the target file, closing it once there is no more data
-				final byte[] buffer = new byte[0x100000];
-				java.io.InputStream in = s.getInputStream();
-				for (int bytesRead = in.read(buffer); bytesRead != -1; bytesRead = in.read(buffer)) {
-					// hmm???
-					s.getOutputStream().write(buffer, 0, bytesRead);
-				}
-				in.close();
-				
-			}
-			if (response.getCode() == 226) {
-				response = receiveResponse();
-			}
-			
-			s.close();
-			
-		}
+		// args - "FTPTEST.txt" "D:\sink"
+		
+		FtpResponse instruction = null;
 		// TODO: If the source file parent is not null, issue a CWD message to the FTP server
 		// using sendRequest(), setting it's current working directory to the source file parent.
-		// Send a PASV message to query the socket-address to be used for the data transfer; ask
-		// the response for the socket address returned using FtpResponse#decodeDataPort().
+		if(sourceFile.getParent() != null) {
+			instruction = this.sendRequest("CWD " + sourceFile.getParent().toString().replace('\\' , '/')); 
+			if(instruction.getCode() != 250) throw new NotDirectoryException(sinkDirectory.toString());
+		}
+		
+		// Send a PASV message to query the socket-address to be used for the data transfer; 
+		instruction = sendRequest("PASV"); 
+		if(instruction.getCode() != 227) throw new ProtocolException();
+		
+		// ask the response for the socket address returned using FtpResponse#decodeDataPort().
+		final InetSocketAddress address = instruction.decodeDataPort(); 
+		
 		// Open a data connection to the socket-address using "new Socket(host, port)".
-		// Send a RETR message over the control connection. After receiving the first part
-		// of it's response (code 150), transport the content of the data connection's INPUT
-		// stream to the target file, closing it once there is no more data. Then receive the
-		// second part of the RETR response (code 226) using receiveResponse(). Make sure the
-		// sink file and the data connection are closed in any case.
+		try(Socket socket = new Socket(address.getHostString(),address.getPort())){
+			Logger.getGlobal().log(Level.INFO, "Opened TCP connection.");
+			instruction = sendRequest("RETR " + sourceFile.getFileName());
+			if(instruction.getCode() == 550) throw new NoSuchFileException(sourceFile.getFileName().toString());
+			if(instruction.getCode() != 150 && instruction.getCode() != 125) throw new ProtocolException();
+			
+			// Send a RETR message over the control connection. After receiving the first part
+			// of it's response (code 150), transport the content of the data connection's INPUT
+			// stream to the target file, closing it once there is no more data.
+			
+			try (OutputStream fos = Files.newOutputStream(sinkDirectory.resolve(sourceFile.getFileName()) , StandardOpenOption.CREATE)){
+				Logger.getGlobal().log(Level.INFO, "Opened output stream");
+				final byte[] buffer = new byte[0x10000];
+				for (int bytesRead = socket.getInputStream().read(buffer); bytesRead != -1; bytesRead = socket.getInputStream().read(buffer)) {
+					fos.write(buffer, 0, bytesRead);
+				}
+			}
+		}
+		
+		// Then receive the second part of the RETR response (code 226) using receiveResponse(). 
+		// Make sure the sink file and the data connection are closed in any case.
+		instruction = receiveResponse();
+		if(instruction.getCode() != 226) throw new ProtocolException();
 	}
 
 
@@ -220,39 +225,52 @@ public final class FtpClient implements AutoCloseable {
 	public synchronized void sendFile (final Path sourceFile, final Path sinkDirectory) throws IOException {
 		if (this.isClosed()) throw new IllegalStateException();
 		if (!Files.isReadable(sourceFile)) throw new NoSuchFileException(sourceFile.toString());
-		
-		if (sinkDirectory != null) {
-			FtpResponse response = this.receiveResponse();
-			response = sendRequest("CWD " + sinkDirectory);
-			response = sendRequest("PASV");
-			response = receiveResponse();
-			InetSocketAddress address = response.decodeDataPort();
-			Socket s = new Socket(address.getHostName(), address.getPort());
-			response = sendRequest("STOR");
-			
-			if (response.getCode() == 150) {
-				OutputStream out = s.getOutputStream();
-				// ???
-				out.close();
-			}
-			if (response.getCode() == 226) {
-				response = receiveResponse();
-			}
-			
-			s.close();
-			
-		}
 
+		// args - local file with global path , relative dir path
+		 // test with sub dir on the server
+		
 		// TODO: If the target directory is not null, issue a CWD message to the FTP server
 		// using sendRequest(), setting it's current working directory to the target directory.
-		// Send a PASV message to query the socket-address to be used for the data transfer; ask
-		// the response for the socket address returned using FtpResponse#decodeDataPort().
+	
+		FtpResponse instruction;
+		if(sinkDirectory != null) {
+			instruction = sendRequest("CWD " + sinkDirectory.toString().replace('\\','/'));
+			if(instruction.getCode() != 250) throw new NotDirectoryException(sinkDirectory.toString());
+		}
+		// Send a PASV message to query the socket-address to be used for the data transfer;
+		
+		instruction = sendRequest("PASV");
+		if(instruction.getCode() != 227) throw new ProtocolException();
+		
+		// ask the response for the socket address returned using FtpResponse#decodeDataPort().
+		
+		InetSocketAddress address = instruction.decodeDataPort();
+		
 		// Open a data connection to the socket-address using "new Socket(host, port)".
-		// Send a STOR message over the control connection. After receiving the first part of
-		// it's response (code 150), transport the source file content to the data connection's
-		// OUTPUT stream, closing it once there is no more data. Then receive the second part
-		// of the STOR response (code 226) using receiveResponse(). Make sure the source file
-		// and the data connection are closed in any case.
+		// Send a STOR message over the control connection.
+		
+		try(Socket socket = new Socket(address.getHostString(),address.getPort())){
+			Logger.getGlobal().log(Level.INFO, "Opened TCP connection.");
+		
+			instruction = sendRequest("STOR " + sourceFile.getFileName()); 
+			if(instruction.getCode() == 550) throw new NoSuchFileException(sourceFile.getFileName().toString());
+			if(instruction.getCode() != 150 && instruction.getCode() != 125) throw new ProtocolException();
+			// After receiving the first part of it's response (code 150), transport the source 
+	        // file content to the data connection's OUTPUT stream, closing it once there is no more data. 
+			
+			try (InputStream fis = Files.newInputStream(sourceFile)){
+				Logger.getGlobal().log(Level.INFO, "Opened input stream");
+				final byte[] buffer = new byte[0x10000];
+				for (int bytesRead = fis.read(buffer); bytesRead != -1; bytesRead = fis.read(buffer)) {
+					socket.getOutputStream().write(buffer, 0, bytesRead);
+				}
+			}
+		}
+		// Then receive the second part of the STOR response (code 226) using receiveResponse(). 
+		// Make sure the source file and the data connection are closed in any case.
+		
+		instruction = receiveResponse();
+		if(instruction.getCode() != 226) throw new ProtocolException();
 	}
 
 
