@@ -10,6 +10,7 @@ import java.net.Socket;
 import java.net.SocketException;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -20,6 +21,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 import javax.net.SocketFactory;
 import javax.net.ssl.SSLSocketFactory;
+import de.htw.ds.sync.ExampleCheckedException;
 import de.htw.tool.Copyright;
 
 
@@ -149,7 +151,7 @@ public class TcpMonitorServer implements Runnable, AutoCloseable {
 		public void run () {
 			final String serverName = this.parent.redirectHostAddress.getHostName();
 			final int serverPort = this.parent.redirectHostAddress.getPort();
-			final boolean transportLayerSecurity = serverPort == 22 | serverPort == 443;
+//			final boolean transportLayerSecurity = serverPort == 22 | serverPort == 443;
 
 //			TLS_SOCKET_FACTORY.createSocket(serverName, serverPort)
 			try (Socket clientConnection = this.clientConnection) {
@@ -162,74 +164,47 @@ public class TcpMonitorServer implements Runnable, AutoCloseable {
 					ByteArrayOutputStream serverOut2 = new ByteArrayOutputStream();
 					
 					final RunnableFuture<?>[] futures = new RunnableFuture[2];
-					final Thread[] threads = new Thread[2];
-					final Object monitor = new Object();
-					
 					
 					final Callable<?> clientInToServerOut = () -> {
-						try {
-							
-							try {
-								de.htw.tool.IOStreams.copy(clientIn, serverOut, MAX_PACKET_SIZE);
-							} catch (IOException e) {
-								e.printStackTrace();
-							}						
-						} finally {
-							synchronized (monitor) {
-								monitor.notify();
-							}
-						}
+						OutputStream out = de.htw.tool.IOStreams.newMultiOutputStream(serverOut, serverOut2);
+						de.htw.tool.IOStreams.copy(clientIn, out, MAX_PACKET_SIZE);
 						return null;
 					};
-					
 					final Callable<?> serverInToClientOut = () -> {
-						try {
-							try {
-								de.htw.tool.IOStreams.copy(serverIn, clientOut, MAX_PACKET_SIZE);
-//								de.htw.tool.IOStreams.copy(serverIn, byteArray, MAX_PACKET_SIZE);
-//								byte[] b = de.htw.tool.IOStreams.read(serverIn);
-							} catch (IOException e) {
-								e.printStackTrace();
-							}
-							
-						} finally {
-							synchronized (monitor) {
-								monitor.notify();
-							}
-						}
-//						return byteArray.toByteArray();
-						return null;
-						
+						OutputStream out = de.htw.tool.IOStreams.newMultiOutputStream(clientOut, clientOut2);
+						de.htw.tool.IOStreams.copy(serverIn, out, MAX_PACKET_SIZE);
+						return null;						
 					};
 					
-
 					final long begin = System.currentTimeMillis();
 					futures[0] = new FutureTask<>(clientInToServerOut);
 					futures[1] = new FutureTask<>(serverInToClientOut);
-					synchronized(monitor) {
-						for (int i = 0; i < futures.length; i++) {
-							threads[i] = new Thread(futures[i]);
-							threads[i].start();
-						}
-						
-						try {
-							for(int loop = 0; loop < futures.length; ++loop) {
-//								byte[] b = (byte[]) futures[loop].get();
-//								TcpMonitorRecord record = TcpMonitorRecord();
-								monitor.wait();
+					for (int i = 0; i < futures.length; i++) {
+						new Thread(futures[i]).start();
+					}
+					
+					try {
+						for (final Future<?> future: futures) {
+							try {
+								future.get();		
+								clientOut2.close();
+								serverOut2.close();
+							} catch (final ExecutionException exception) {
+								final Throwable cause = exception.getCause();	// manual precise rethrow for cause!
+								if (cause instanceof Error) throw (Error) cause;
+								if (cause instanceof RuntimeException) throw (RuntimeException) cause;
+								if (cause instanceof ExampleCheckedException) throw (ExampleCheckedException) cause;
+								throw new AssertionError();
 							}
-						} catch (final Throwable exception) {
-							for (final Thread thread : threads) {
-								thread.interrupt();
-							}
-							throw exception;
 						}
+					} finally {
+						for (final Future<?> future : futures)
+							future.cancel(true);
 					}
 					
 					final long end = System.currentTimeMillis();
 					final TcpMonitorRecord record = new TcpMonitorRecord(begin, end, clientOut2.toByteArray(), serverOut2.toByteArray());
 					this.parent.recordConsumer.accept(record);
-					
 					
 					// TODO: Transport all content from the client connection's input stream into
 					// both the server connection's output stream and a byte output stream. In
